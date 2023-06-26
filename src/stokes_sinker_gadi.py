@@ -39,17 +39,14 @@ nstep = 1
 tol = 1e-5
 
 # %%
-#### output folder name
-outputPath = f"../../stokes_output/sinker_eta1e6_rho10/"
+outputPath = f"./stokes_output/sinker_eta1e6_rho10/"
+
+outfile = outputPath + "/stokes"
 
 if uw.mpi.rank==0:      
     ### create folder if not run before
     if not os.path.exists(outputPath):
         os.makedirs(outputPath)
-
-# %%
-### resolution of the model
-res = 80
 
 # %%
 # Set size and position of dense sphere.
@@ -77,7 +74,7 @@ x_pos = sphereCentre[0]
 y_pos = sphereCentre[1] - sphereRadius
 
 # %%
-nsteps = 1
+nsteps = 2
 
 # %%
 # mesh = uw.meshing.UnstructuredSimplexBox(
@@ -88,11 +85,12 @@ x_min = -1.
 x_max = 1.
 z_min = 0
 z_max = 1
+res = 80
 
-mesh = uw.meshing.StructuredQuadBox(minCoords=(x_min, z_min), maxCoords=(x_max, z_max),  elementRes=(res,res))
-# mesh = uw.meshing.UnstructuredSimplexBox(
-#     minCoords=(-1.0, 0.0), maxCoords=(1.0, 1.0), cellSize=1.0 / res, regular=True
-# )
+# mesh = uw.meshing.StructuredQuadBox(minCoords=(x_min, z_min), maxCoords=(x_max, z_max),  elementRes=(res,res))
+mesh = uw.meshing.UnstructuredSimplexBox(
+    minCoords=(x_min, z_min), maxCoords=(x_max, z_max), cellSize=1.0 / res, regular=False
+)
 
 # %% [markdown]
 # ####  Create Stokes object and the required mesh variables (velocity and pressure)
@@ -100,8 +98,8 @@ mesh = uw.meshing.StructuredQuadBox(minCoords=(x_min, z_min), maxCoords=(x_max, 
 # %%
 v = uw.discretisation.MeshVariable("U", mesh, mesh.dim, degree=2)
 p = uw.discretisation.MeshVariable("P", mesh, 1, degree=1)
-bf = uw.discretisation.MeshVariable("F", mesh, mesh.dim, degree=2) # for the body force
-
+bfz = uw.discretisation.MeshVariable("BF", mesh, 1, degree=2) # for the body force
+visc = uw.discretisation.MeshVariable("VISC", mesh, 1, degree=2)
 
 # %%
 stokes = uw.systems.Stokes(mesh, velocityField=v, pressureField=p)
@@ -189,10 +187,21 @@ stokes.bodyforce = sympy.Matrix([0, -1 * density_fn])
 stokes.saddle_preconditioner = 1.0 / stokes.constitutive_model.Parameters.viscosity
 
 # projection object to calculate the body force on the mesh 
-# bfz_calc = uw.systems.Projection(mesh, bf)
-# bfz_calc.uw_function = sympy.Matrix([0, -1 * density_fn])
-# bfz_calc.smoothing = 1.0e-3
-# bfz_calc.petsc_options.delValue("ksp_monitor")
+bfz_calc = uw.systems.Projection(mesh, bfz)
+bfz_calc.uw_function = -1*density_fn
+bfz_calc.smoothing = 1.0e-5
+bfz_calc.petsc_options.delValue("ksp_monitor")
+
+# projection object to calculate the gradient along Z
+visc_calc = uw.systems.Projection(mesh, visc)
+visc_calc.uw_function = viscosity_fn
+visc_calc.smoothing = 1.0e-5
+visc_calc.petsc_options.delValue("ksp_monitor")
+
+# %%
+with mesh.access():
+    print(bfz.data.min())
+    print(visc.data.max())
 
 # %%
 stokes.tolerance = tol
@@ -213,15 +222,15 @@ if uw.mpi.size == 1:
 stokes.petsc_options.view()
 
 # %%
-# calculate the body force on a coordinate grid - since FNO accepts rectangular grids
-x_grid = np.linspace(x_min, 0.9999999*x_max, res)
-z_grid = np.linspace(z_min, 0.9999999*z_max, res)
+# # calculate the body force on a coordinate grid - since FNO accepts rectangular grids
+# x_grid = np.linspace(x_min, 0.9999999*x_max, res)
+# z_grid = np.linspace(z_min, 0.9999999*z_max, res)
 
-xx, zz = np.meshgrid(x_grid, z_grid)
+# xx, zz = np.meshgrid(x_grid, z_grid)
 
-pos_eval = np.zeros((xx.flatten().shape[0], 2))
-pos_eval[:, 0] = xx.flatten()
-pos_eval[:, 1] = zz.flatten()
+# pos_eval = np.zeros((xx.flatten().shape[0], 2))
+# pos_eval[:, 0] = xx.flatten()
+# pos_eval[:, 1] = zz.flatten()
 
 # %% [markdown]
 # #### Stokes solver loop
@@ -232,7 +241,7 @@ while step < nsteps:
     with tracer.access():
         ymin = tracer.data[:,1].min()
 
-    if ymin <= 1e-6: # break if tracer is close to bottom
+    if ymin <= 1e-5: # break if tracer is close to bottom
         break
 
     ySinker[step] = ymin
@@ -255,33 +264,37 @@ while step < nsteps:
     ### advect tracer
     tracer.advection(stokes.u.sym, dt, corrector=False)
 
-    #  calculate the body force, ux, uz, pressure
-    bf_z = uw.function.evaluate(-1*density_fn, pos_eval)
-    ux_proj = uw.function.evaluate(v.sym[0], pos_eval)
-    uz_proj = uw.function.evaluate(v.sym[1], pos_eval)
-    p_proj = uw.function.evaluate(p.sym[0], pos_eval)
-    visc_proj = uw.function.evaluate(viscosity_fn, pos_eval)
+    bfz_calc.solve()
+    visc_calc.solve()
 
-    bf_z_rev = bf_z.reshape(xx.shape) # revert to rectangular mesh shape
-    ux_rev = ux_proj.reshape(xx.shape)
-    uz_rev = uz_proj.reshape(xx.shape)
-    p_rev = p_proj.reshape(xx.shape)
-    visc_rev = visc_proj.reshape(xx.shape)
+    mesh.write_timestep_xdmf(filename = outfile, meshVars=[v, p, bfz, visc], index=step)
+    # #  calculate the body force, ux, uz, pressure
+    # bf_z = uw.function.evaluate(-1*density_fn, pos_eval)
+    # ux_proj = uw.function.evaluate(v.sym[0], pos_eval)
+    # uz_proj = uw.function.evaluate(v.sym[1], pos_eval)
+    # p_proj = uw.function.evaluate(p.sym[0], pos_eval)
+    # visc_proj = uw.function.evaluate(viscosity_fn, pos_eval)
 
-    # pack the predictables one array - L, R, C
-    vxvzp = np.zeros([3, xx.shape[0], xx.shape[1]])
-    vxvzp[0, :, :] = ux_rev
-    vxvzp[1, :, :] = uz_rev
-    vxvzp[2, :, :] = p_rev
+    # bf_z_rev = bf_z.reshape(xx.shape) # revert to rectangular mesh shape
+    # ux_rev = ux_proj.reshape(xx.shape)
+    # uz_rev = uz_proj.reshape(xx.shape)
+    # p_rev = p_proj.reshape(xx.shape)
+    # visc_rev = visc_proj.reshape(xx.shape)
 
-    # pack the inputs one array - L, R, C
-    bfv = np.zeros([2, xx.shape[0], xx.shape[1]]) # body force and viscosity
-    bfv[0, :, :] = bf_z_rev
-    bfv[1, :, :] = visc_rev
+    # # pack the predictables one array - L, R, C
+    # vxvzp = np.zeros([3, xx.shape[0], xx.shape[1]])
+    # vxvzp[0, :, :] = ux_rev
+    # vxvzp[1, :, :] = uz_rev
+    # vxvzp[2, :, :] = p_rev
 
-    # save the inputs and outputs
-    zarr.save(outputPath + "/vxvzp_{}.zarr".format(step), vxvzp)
-    zarr.save(outputPath + "/bfv_{}.zarr".format(step), bfv)
+    # # pack the inputs one array - L, R, C
+    # bfv = np.zeros([2, xx.shape[0], xx.shape[1]]) # body force and viscosity
+    # bfv[0, :, :] = bf_z_rev
+    # bfv[1, :, :] = visc_rev
+
+    # # save the inputs and outputs
+    # zarr.save(outputPath + "/vxvzp_{}.zarr".format(step), vxvzp)
+    # zarr.save(outputPath + "/bfv_{}.zarr".format(step), bfv)
 
     step += 1
     time += dt
@@ -404,10 +417,16 @@ while step < nsteps:
 # %%
 # import matplotlib.pyplot as plt
 
-# fig, ax = plt.subplots(dpi = 150)
-# out = ax.scatter(xx.flatten(), zz.flatten(), c = visc_rev.flatten(), cmap = "coolwarm", s = 5)
-# plt.colorbar(out)
-# ax.set_aspect("equal")
+# with mesh.access():
+#     # fig, ax = plt.subplots(dpi = 150)
+#     # out = ax.scatter(xx.flatten(), zz.flatten(), c = visc_rev.flatten(), cmap = "coolwarm", s = 5)
+#     # plt.colorbar(out)
+#     # ax.set_aspect("equal")
+
+#     fig, ax = plt.subplots(dpi = 150)
+#     out = ax.scatter(bfz.coords[:, 0], bfz.coords[:, 1], c = bfz.data[:, 0], cmap = "coolwarm", s = 0.05)
+#     plt.colorbar(out)
+#     ax.set_aspect("equal")
 
 # %%
 # fig, ax = plt.subplots(dpi = 150)
