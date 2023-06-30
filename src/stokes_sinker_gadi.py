@@ -32,14 +32,15 @@ save_output = False
 
 # %%
 ### number of steps for the model
-nstep = 1
 
 # %%
 ### stokes tolerance
 tol = 1e-5
 
 # %%
-outputPath = f"./stokes_output/sinker_eta1e6_rho10/"
+res = 80
+
+outputPath = f"./stokes_output/sinker_eta1e6_rho10_small_shift2" + str(res)
 
 outfile = outputPath + "/stokes"
 
@@ -50,8 +51,10 @@ if uw.mpi.rank==0:
 
 # %%
 # Set size and position of dense sphere.
+# sphereRadius = 0.1
+# sphereCentre = (0., 0.7)
 sphereRadius = 0.1
-sphereCentre = (0.0, 0.7)
+sphereCentre = (0.0, 0.6)
 
 # %%
 # define some names for our index
@@ -74,7 +77,7 @@ x_pos = sphereCentre[0]
 y_pos = sphereCentre[1] - sphereRadius
 
 # %%
-nsteps = 2
+nsteps = 1
 
 # %%
 # mesh = uw.meshing.UnstructuredSimplexBox(
@@ -85,7 +88,6 @@ x_min = -1.
 x_max = 1.
 z_min = 0
 z_max = 1
-res = 80
 
 # mesh = uw.meshing.StructuredQuadBox(minCoords=(x_min, z_min), maxCoords=(x_max, z_max),  elementRes=(res,res))
 mesh = uw.meshing.UnstructuredSimplexBox(
@@ -238,18 +240,19 @@ stokes.petsc_options.view()
 # %%
 while step < nsteps:
     ### Get the position of the sinking ball
-    with tracer.access():
-        ymin = tracer.data[:,1].min()
+    #with tracer.access():
+    #    ymin = tracer.data[:,1].min()
 
-    if ymin <= 1e-5: # break if tracer is close to bottom
-        break
+    #if ymin <= 1e-5: # break if tracer is close to bottom
+    #    break
 
-    ySinker[step] = ymin
+    #ySinker[step] = ymin
     tSinker[step] = time
     
     ### print some stuff
-    if uw.mpi.rank == 0:
-        print(f"Step: {str(step).rjust(3)}, time: {time:6.2f}, tracer:  {ymin:6.2f}")
+    #if uw.mpi.rank == 0:
+    #    print(f"Step: {str(step).rjust(3)}")
+    #    print(f"Step: {str(step).rjust(3)}, time: {time:6.2f}, tracer:  {ymin:6.2f}")
 
     ### solve stokes
     stokes.solve(zero_init_guess=True)
